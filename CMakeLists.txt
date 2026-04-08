@@ -17,6 +17,8 @@ target_link_libraries(toasty PRIVATE
     shell32
     ole32
     propsys
+    gdiplus
+    dwmapi
 )
 
 # Optimize for size in Release

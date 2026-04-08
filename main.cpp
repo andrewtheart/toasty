@@ -17,11 +17,15 @@
 #include <tlhelp32.h>
 #include <winhttp.h>
 #include "resource.h"
+#include <gdiplus.h>
+#include <dwmapi.h>
 
 #pragma comment(lib, "shlwapi.lib")
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "winhttp.lib")
+#pragma comment(lib, "gdiplus.lib")
+#pragma comment(lib, "dwmapi.lib")
 
 using namespace winrt;
 using namespace Windows::Data::Xml::Dom;
@@ -36,6 +40,18 @@ const wchar_t* TOASTY_VERSION = L"0.6";
 
 // Global flags
 bool g_dryRun = false;
+
+// Toast position for custom positioned notifications
+enum class ToastPosition {
+    Default,
+    TopLeft,
+    TopRight,
+    MiddleLeft,
+    MiddleRight,
+    BottomLeft,
+    BottomMiddle,
+    BottomRight
+};
 
 // RAII wrapper for Windows handles
 struct HandleGuard {
@@ -285,6 +301,319 @@ const AppPreset* detect_preset_from_ancestors(bool debug = false) {
     return nullptr;
 }
 
+// === Custom positioned toast notification ===
+
+ToastPosition parse_position(const std::wstring& pos) {
+    auto lower = to_lower(pos);
+    if (lower == L"top-left" || lower == L"topleft" || lower == L"tl") return ToastPosition::TopLeft;
+    if (lower == L"top-right" || lower == L"topright" || lower == L"tr") return ToastPosition::TopRight;
+    if (lower == L"middle-left" || lower == L"middleleft" || lower == L"ml") return ToastPosition::MiddleLeft;
+    if (lower == L"middle-right" || lower == L"middleright" || lower == L"mr") return ToastPosition::MiddleRight;
+    if (lower == L"bottom-left" || lower == L"bottomleft" || lower == L"bl") return ToastPosition::BottomLeft;
+    if (lower == L"bottom-middle" || lower == L"bottommiddle" || lower == L"bm") return ToastPosition::BottomMiddle;
+    if (lower == L"bottom-right" || lower == L"bottomright" || lower == L"br") return ToastPosition::BottomRight;
+    return ToastPosition::Default;
+}
+
+std::wstring position_to_string(ToastPosition pos) {
+    switch (pos) {
+        case ToastPosition::TopLeft: return L"top-left";
+        case ToastPosition::TopRight: return L"top-right";
+        case ToastPosition::MiddleLeft: return L"middle-left";
+        case ToastPosition::MiddleRight: return L"middle-right";
+        case ToastPosition::BottomLeft: return L"bottom-left";
+        case ToastPosition::BottomMiddle: return L"bottom-middle";
+        case ToastPosition::BottomRight: return L"bottom-right";
+        default: return L"default";
+    }
+}
+
+// Monitor enumeration
+struct MonitorInfo {
+    HMONITOR handle;
+    RECT workArea;
+    RECT bounds;
+    int index; // 1-based
+};
+
+static BOOL CALLBACK MonitorEnumProc(HMONITOR hMonitor, HDC, LPRECT, LPARAM dwData) {
+    auto* monitors = (std::vector<MonitorInfo>*)dwData;
+    MONITORINFO mi = {};
+    mi.cbSize = sizeof(MONITORINFO);
+    if (GetMonitorInfoW(hMonitor, &mi)) {
+        MonitorInfo info;
+        info.handle = hMonitor;
+        info.workArea = mi.rcWork;
+        info.bounds = mi.rcMonitor;
+        info.index = (int)monitors->size() + 1;
+        monitors->push_back(info);
+    }
+    return TRUE;
+}
+
+std::vector<MonitorInfo> enumerate_monitors() {
+    std::vector<MonitorInfo> monitors;
+    EnumDisplayMonitors(nullptr, nullptr, MonitorEnumProc, (LPARAM)&monitors);
+    return monitors;
+}
+
+RECT get_monitor_work_area(int monitorIndex) {
+    auto monitors = enumerate_monitors();
+    if (monitorIndex >= 1 && monitorIndex <= (int)monitors.size()) {
+        return monitors[monitorIndex - 1].workArea;
+    }
+    // Default: primary monitor work area
+    RECT workArea;
+    SystemParametersInfoW(SPI_GETWORKAREA, 0, &workArea, 0);
+    return workArea;
+}
+
+// Custom toast window constants
+static const int TOAST_WIDTH = 364;
+static const int TOAST_HEIGHT = 110;
+static const int TOAST_ICON_SIZE = 48;
+static const int TOAST_PADDING = 16;
+static const int TOAST_DISMISS_MS = 5000;
+static const int TOAST_MARGIN = 12;
+
+struct CustomToastData {
+    std::wstring title;
+    std::wstring message;
+    Gdiplus::Image* icon;
+    bool isDarkMode;
+    int durationMs;
+};
+
+static bool detect_dark_mode() {
+    HKEY hKey;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER,
+        L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+        0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+        DWORD value = 1;
+        DWORD size = sizeof(DWORD);
+        RegQueryValueExW(hKey, L"AppsUseLightTheme", nullptr, nullptr, (BYTE*)&value, &size);
+        RegCloseKey(hKey);
+        return value == 0;
+    }
+    return true; // Default to dark
+}
+
+static POINT calculate_toast_position(const RECT& workArea, ToastPosition position) {
+    POINT pt;
+    int areaWidth = workArea.right - workArea.left;
+    int areaHeight = workArea.bottom - workArea.top;
+
+    switch (position) {
+        case ToastPosition::TopLeft:
+            pt.x = workArea.left + TOAST_MARGIN;
+            pt.y = workArea.top + TOAST_MARGIN;
+            break;
+        case ToastPosition::TopRight:
+            pt.x = workArea.right - TOAST_WIDTH - TOAST_MARGIN;
+            pt.y = workArea.top + TOAST_MARGIN;
+            break;
+        case ToastPosition::MiddleLeft:
+            pt.x = workArea.left + TOAST_MARGIN;
+            pt.y = workArea.top + (areaHeight - TOAST_HEIGHT) / 2;
+            break;
+        case ToastPosition::MiddleRight:
+            pt.x = workArea.right - TOAST_WIDTH - TOAST_MARGIN;
+            pt.y = workArea.top + (areaHeight - TOAST_HEIGHT) / 2;
+            break;
+        case ToastPosition::BottomLeft:
+            pt.x = workArea.left + TOAST_MARGIN;
+            pt.y = workArea.bottom - TOAST_HEIGHT - TOAST_MARGIN;
+            break;
+        case ToastPosition::BottomMiddle:
+            pt.x = workArea.left + (areaWidth - TOAST_WIDTH) / 2;
+            pt.y = workArea.bottom - TOAST_HEIGHT - TOAST_MARGIN;
+            break;
+        case ToastPosition::BottomRight:
+        default:
+            pt.x = workArea.right - TOAST_WIDTH - TOAST_MARGIN;
+            pt.y = workArea.bottom - TOAST_HEIGHT - TOAST_MARGIN;
+            break;
+    }
+    return pt;
+}
+
+static LRESULT CALLBACK ToastWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    CustomToastData* data = (CustomToastData*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+
+    switch (msg) {
+        case WM_CREATE: {
+            auto* cs = (CREATESTRUCTW*)lParam;
+            data = (CustomToastData*)cs->lpCreateParams;
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)data);
+            SetTimer(hwnd, 1, data ? data->durationMs : TOAST_DISMISS_MS, nullptr);
+
+            // Windows 11 rounded corners
+            DWORD preference = 2; // DWMWCP_ROUND
+            DwmSetWindowAttribute(hwnd, 33 /*DWMWA_WINDOW_CORNER_PREFERENCE*/,
+                                  &preference, sizeof(preference));
+            return 0;
+        }
+
+        case WM_PAINT: {
+            PAINTSTRUCT ps;
+            HDC hdc = BeginPaint(hwnd, &ps);
+
+            RECT rc;
+            GetClientRect(hwnd, &rc);
+
+            // Double buffering
+            HDC memDC = CreateCompatibleDC(hdc);
+            HBITMAP memBmp = CreateCompatibleBitmap(hdc, rc.right, rc.bottom);
+            HBITMAP oldBmp = (HBITMAP)SelectObject(memDC, memBmp);
+
+            Gdiplus::Graphics graphics(memDC);
+            graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+            graphics.SetTextRenderingHint(Gdiplus::TextRenderingHintClearTypeGridFit);
+
+            // Theme colors
+            bool dark = data ? data->isDarkMode : true;
+            Gdiplus::Color bgColor = dark ? Gdiplus::Color(255, 44, 44, 44) : Gdiplus::Color(255, 243, 243, 243);
+            Gdiplus::Color titleColor = dark ? Gdiplus::Color(255, 255, 255, 255) : Gdiplus::Color(255, 0, 0, 0);
+            Gdiplus::Color msgColor = dark ? Gdiplus::Color(255, 204, 204, 204) : Gdiplus::Color(255, 89, 89, 89);
+            Gdiplus::Color borderColor = dark ? Gdiplus::Color(255, 64, 64, 64) : Gdiplus::Color(255, 208, 208, 208);
+
+            // Background
+            Gdiplus::SolidBrush bgBrush(bgColor);
+            graphics.FillRectangle(&bgBrush, 0, 0, rc.right, rc.bottom);
+
+            // Border
+            Gdiplus::Pen borderPen(borderColor, 1.0f);
+            graphics.DrawRectangle(&borderPen, 0, 0, rc.right - 1, rc.bottom - 1);
+
+            int x = TOAST_PADDING;
+            int textTop = TOAST_PADDING;
+
+            // Draw icon
+            if (data && data->icon && data->icon->GetLastStatus() == Gdiplus::Ok) {
+                int iconY = (rc.bottom - TOAST_ICON_SIZE) / 2;
+                graphics.DrawImage(data->icon, x, iconY, TOAST_ICON_SIZE, TOAST_ICON_SIZE);
+                x += TOAST_ICON_SIZE + TOAST_PADDING;
+            }
+
+            // Draw title and message
+            Gdiplus::FontFamily fontFamily(L"Segoe UI");
+            Gdiplus::Font titleFont(&fontFamily, 14, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
+            Gdiplus::Font msgFont(&fontFamily, 13, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
+
+            Gdiplus::SolidBrush titleBrush(titleColor);
+            Gdiplus::SolidBrush msgBrush(msgColor);
+            Gdiplus::StringFormat sf;
+            sf.SetTrimming(Gdiplus::StringTrimmingEllipsisCharacter);
+
+            if (data) {
+                int textWidth = rc.right - x - TOAST_PADDING;
+
+                Gdiplus::RectF titleRect((Gdiplus::REAL)x, (Gdiplus::REAL)textTop,
+                                         (Gdiplus::REAL)textWidth, 22.0f);
+                graphics.DrawString(data->title.c_str(), -1, &titleFont, titleRect, &sf, &titleBrush);
+
+                Gdiplus::RectF msgRect((Gdiplus::REAL)x, (Gdiplus::REAL)(textTop + 26),
+                                       (Gdiplus::REAL)textWidth,
+                                       (Gdiplus::REAL)(rc.bottom - textTop - 26 - TOAST_PADDING));
+                graphics.DrawString(data->message.c_str(), -1, &msgFont, msgRect, &sf, &msgBrush);
+            }
+
+            // Copy to screen
+            BitBlt(hdc, 0, 0, rc.right, rc.bottom, memDC, 0, 0, SRCCOPY);
+
+            SelectObject(memDC, oldBmp);
+            DeleteObject(memBmp);
+            DeleteDC(memDC);
+
+            EndPaint(hwnd, &ps);
+            return 0;
+        }
+
+        case WM_TIMER:
+            KillTimer(hwnd, 1);
+            DestroyWindow(hwnd);
+            return 0;
+
+        case WM_LBUTTONUP:
+            DestroyWindow(hwnd);
+            return 0;
+
+        case WM_DESTROY:
+            PostQuitMessage(0);
+            return 0;
+    }
+
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+void show_custom_toast(const std::wstring& title, const std::wstring& message,
+                       const std::wstring& iconPath, ToastPosition position, int monitorIndex,
+                       int durationMs = TOAST_DISMISS_MS) {
+    // Initialize GDI+
+    Gdiplus::GdiplusStartupInput gdiplusInput;
+    ULONG_PTR gdiplusToken;
+    Gdiplus::GdiplusStartup(&gdiplusToken, &gdiplusInput, nullptr);
+
+    // Load icon image from file (PNG extracted by extract_icon_to_temp)
+    Gdiplus::Image* icon = nullptr;
+    if (!iconPath.empty()) {
+        icon = Gdiplus::Image::FromFile(iconPath.c_str());
+        if (icon && icon->GetLastStatus() != Gdiplus::Ok) {
+            delete icon;
+            icon = nullptr;
+        }
+    }
+
+    // Prepare toast data
+    CustomToastData toastData;
+    toastData.title = title;
+    toastData.message = message;
+    toastData.icon = icon;
+    toastData.isDarkMode = detect_dark_mode();
+    toastData.durationMs = durationMs;
+
+    // Register window class
+    WNDCLASSEXW wc = {};
+    wc.cbSize = sizeof(WNDCLASSEXW);
+    wc.lpfnWndProc = ToastWndProc;
+    wc.hInstance = GetModuleHandleW(nullptr);
+    wc.lpszClassName = L"ToastyCustomToast";
+    wc.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512)); // IDC_ARROW
+    RegisterClassExW(&wc);
+
+    // Calculate position on the target monitor
+    RECT workArea = get_monitor_work_area(monitorIndex);
+    POINT pos = calculate_toast_position(workArea, position);
+
+    // Create popup window — topmost, no taskbar entry, doesn't steal focus
+    HWND hwnd = CreateWindowExW(
+        WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+        L"ToastyCustomToast",
+        L"Toasty",
+        WS_POPUP | WS_VISIBLE,
+        pos.x, pos.y, TOAST_WIDTH, TOAST_HEIGHT,
+        nullptr, nullptr, GetModuleHandleW(nullptr), &toastData);
+
+    if (!hwnd) {
+        delete icon;
+        Gdiplus::GdiplusShutdown(gdiplusToken);
+        return;
+    }
+
+    ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+    UpdateWindow(hwnd);
+
+    // Message loop — runs until the toast is dismissed (~5 seconds or click)
+    MSG msg;
+    while (GetMessageW(&msg, nullptr, 0, 0)) {
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+
+    delete icon;
+    Gdiplus::GdiplusShutdown(gdiplusToken);
+}
+
 void print_usage() {
     std::wcout << L"toasty - Windows toast notification CLI\n\n"
                << L"Usage:\n"
@@ -296,6 +625,10 @@ void print_usage() {
                << L"  -t, --title <text>   Set notification title (default: \"Notification\")\n"
                << L"  --app <name>         Use AI CLI preset (claude, copilot, gemini, codex, cursor)\n"
                << L"  -i, --icon <path>    Custom icon path (PNG recommended, 48x48px)\n"
+               << L"  -p, --position <pos> Toast position: top-left, top-right, middle-left,\n"
+               << L"                       middle-right, bottom-left, bottom-middle, bottom-right\n"
+               << L"  -m, --monitor <n>    Show toast on monitor N (1, 2, 3, etc.)\n"
+               << L"  -d, --duration <sec> How long the toast stays visible (default: 5)\n"
                << L"  -v, --version        Show version and exit\n"
                << L"  -h, --help           Show this help\n"
                << L"  --install [agent]    Install hooks for AI CLI agents (claude, gemini, copilot, codex, or all)\n"
@@ -1808,6 +2141,11 @@ int wmain(int argc, wchar_t* argv[]) {
     bool explicitApp = false;  // Track if user explicitly set --app
     bool explicitTitle = false; // Track if user explicitly set -t
     bool debug = false;
+    ToastPosition toastPosition = ToastPosition::Default;
+    int monitorIndex = 0;  // 0 = auto (primary), 1+ = specific monitor
+    bool useCustomToast = false;
+    int durationMs = TOAST_DISMISS_MS; // default 5 seconds
+    bool customDuration = false;
 
     // Quick scan for --debug and --dry-run flags
     for (int i = 1; i < argc; i++) {
@@ -1911,6 +2249,59 @@ int wmain(int argc, wchar_t* argv[]) {
                 return 1;
             }
         }
+        else if (arg == L"-p" || arg == L"--position") {
+            if (i + 1 < argc) {
+                toastPosition = parse_position(argv[++i]);
+                if (toastPosition == ToastPosition::Default) {
+                    std::wcerr << L"Error: Unknown position '" << argv[i] << L"'\n";
+                    std::wcerr << L"Valid: top-left, top-right, middle-left, middle-right, bottom-left, bottom-middle, bottom-right\n";
+                    return 1;
+                }
+                useCustomToast = true;
+            } else {
+                std::wcerr << L"Error: --position requires an argument\n";
+                return 1;
+            }
+        }
+        else if (arg == L"-d" || arg == L"--duration") {
+            if (i + 1 < argc) {
+                std::wstring durStr = argv[++i];
+                try {
+                    int seconds = std::stoi(durStr);
+                    if (seconds < 1 || seconds > 300) {
+                        std::wcerr << L"Error: Duration must be between 1 and 300 seconds\n";
+                        return 1;
+                    }
+                    durationMs = seconds * 1000;
+                    customDuration = true;
+                } catch (...) {
+                    std::wcerr << L"Error: Invalid duration '" << durStr << L"'\n";
+                    return 1;
+                }
+            } else {
+                std::wcerr << L"Error: --duration requires an argument (seconds)\n";
+                return 1;
+            }
+        }
+        else if (arg == L"-m" || arg == L"--monitor") {
+            if (i + 1 < argc) {
+                std::wstring monStr = argv[++i];
+                try {
+                    monitorIndex = std::stoi(monStr);
+                    if (monitorIndex < 1) {
+                        std::wcerr << L"Error: Monitor index must be >= 1\n";
+                        return 1;
+                    }
+                    useCustomToast = true;
+                } catch (...) {
+                    std::wcerr << L"Error: Invalid monitor number '" << monStr << L"'\n";
+                    return 1;
+                }
+            } else {
+                std::wcerr << L"Error: --monitor requires an argument\n";
+                return 1;
+            }
+        }
         else if (arg == L"--debug") {
             // Already handled in pre-scan
         }
@@ -2000,6 +2391,63 @@ int wmain(int argc, wchar_t* argv[]) {
         return 1;
     }
 
+    // Custom positioned toast (when --position, --monitor, or custom --duration is specified)
+    // WinRT toasts only support ~7s (short) or ~25s (long), so use custom toast for precise durations
+    if (useCustomToast || (customDuration && durationMs != TOAST_DISMISS_MS)) {
+        if (toastPosition == ToastPosition::Default) {
+            toastPosition = ToastPosition::BottomRight;
+        }
+        if (monitorIndex == 0) {
+            monitorIndex = 1; // Default to primary monitor
+        }
+
+        if (g_dryRun) {
+            std::wcout << L"[dry-run] Custom positioned toast:\n";
+            std::wcout << L"[dry-run] Position: " << position_to_string(toastPosition) << L"\n";
+            std::wcout << L"[dry-run] Monitor: " << monitorIndex << L"\n";
+            std::wcout << L"[dry-run] Title: " << title << L"\n";
+            std::wcout << L"[dry-run] Message: " << message << L"\n";
+            std::wcout << L"[dry-run] Icon: " << (iconPath.empty() ? L"(none)" : iconPath) << L"\n";
+            std::wcout << L"[dry-run] Duration: " << (durationMs / 1000) << L"s\n";
+
+            auto monitors = enumerate_monitors();
+            std::wcout << L"[dry-run] Available monitors: " << monitors.size() << L"\n";
+            for (const auto& mon : monitors) {
+                std::wcout << L"[dry-run]   Monitor " << mon.index
+                           << L": " << (mon.workArea.right - mon.workArea.left)
+                           << L"x" << (mon.workArea.bottom - mon.workArea.top) << L"\n";
+            }
+
+            wchar_t topicBuf[256] = {};
+            if (GetEnvironmentVariableW(L"TOASTY_NTFY_TOPIC", topicBuf, 256) && topicBuf[0] != L'\0') {
+                wchar_t serverBuf[256] = {};
+                std::wstring server = L"ntfy.sh";
+                if (GetEnvironmentVariableW(L"TOASTY_NTFY_SERVER", serverBuf, 256) && serverBuf[0] != L'\0') {
+                    server = serverBuf;
+                }
+                std::wcout << L"[dry-run] ntfy: would POST to https://" << server << L"/" << topicBuf << L"\n";
+            } else {
+                std::wcout << L"[dry-run] ntfy: not configured\n";
+            }
+            std::wcout << L"[dry-run] Update check: skipped\n";
+            return 0;
+        }
+
+        ensure_registered();
+
+        // Show the custom positioned toast (blocks until dismissed)
+        show_custom_toast(title, message, iconPath, toastPosition, monitorIndex, durationMs);
+
+        // Send push notification via ntfy if configured
+        send_ntfy_notification(title, message);
+
+        // Check for updates (needs WinRT)
+        init_apartment();
+        check_for_updates();
+
+        return 0;
+    }
+
     try {
         // Auto-register if needed
         ensure_registered();
@@ -2033,7 +2481,8 @@ int wmain(int argc, wchar_t* argv[]) {
         }
 
         // Build toast XML with protocol activation for click-to-focus
-        std::wstring xml = L"<toast activationType=\"protocol\" launch=\"toasty://focus\"><visual><binding template=\"ToastGeneric\">";
+        std::wstring durationAttr = customDuration ? L" duration=\"long\"" : L"";
+        std::wstring xml = L"<toast activationType=\"protocol\" launch=\"toasty://focus\"" + durationAttr + L"><visual><binding template=\"ToastGeneric\">";
         
         // Add icon if provided
         if (!iconPath.empty()) {
@@ -2048,6 +2497,7 @@ int wmain(int argc, wchar_t* argv[]) {
             std::wcout << L"[dry-run] Title: " << title << L"\n";
             std::wcout << L"[dry-run] Message: " << message << L"\n";
             std::wcout << L"[dry-run] Icon: " << (iconPath.empty() ? L"(none)" : iconPath) << L"\n";
+            std::wcout << L"[dry-run] Duration: " << (durationMs / 1000) << L"s" << (customDuration ? L"" : L" (default)") << L"\n";
             std::wcout << L"[dry-run] Toast XML:\n" << xml << L"\n";
 
             // Show ntfy status

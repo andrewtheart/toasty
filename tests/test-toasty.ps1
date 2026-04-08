@@ -302,6 +302,215 @@ if ((Assert-ExitCode "ntfy custom server exits 0" 0 $r.ExitCode) -and
 }
 
 # ============================================================
+# Test Suite: Position Flag
+# ============================================================
+Write-Host "`nPosition Tests" -ForegroundColor Cyan
+Write-Host ("=" * 40)
+
+# All valid positions
+$positions = @(
+    @{ Flag = "top-left";      Display = "top-left" },
+    @{ Flag = "top-right";     Display = "top-right" },
+    @{ Flag = "middle-left";   Display = "middle-left" },
+    @{ Flag = "middle-right";  Display = "middle-right" },
+    @{ Flag = "bottom-left";   Display = "bottom-left" },
+    @{ Flag = "bottom-middle"; Display = "bottom-middle" },
+    @{ Flag = "bottom-right";  Display = "bottom-right" }
+)
+
+foreach ($pos in $positions) {
+    $r = Run-Toasty @("test", "--position", $pos.Flag, "--dry-run")
+    if ((Assert-ExitCode "position $($pos.Flag) exits 0" 0 $r.ExitCode) -and
+        (Assert-OutputContains "position $($pos.Flag)" $r.Stdout "Position: $($pos.Display)")) {
+        Pass "--position $($pos.Flag)"
+    }
+}
+
+# Short aliases
+$aliases = @(
+    @{ Flag = "tl"; Display = "top-left" },
+    @{ Flag = "br"; Display = "bottom-right" },
+    @{ Flag = "ml"; Display = "middle-left" },
+    @{ Flag = "bm"; Display = "bottom-middle" }
+)
+
+foreach ($alias in $aliases) {
+    $r = Run-Toasty @("test", "-p", $alias.Flag, "--dry-run")
+    if ((Assert-ExitCode "position alias $($alias.Flag) exits 0" 0 $r.ExitCode) -and
+        (Assert-OutputContains "position alias $($alias.Flag)" $r.Stdout "Position: $($alias.Display)")) {
+        Pass "-p $($alias.Flag) alias"
+    }
+}
+
+# Invalid position
+$r = Run-Toasty @("test", "--position", "invalid", "--dry-run")
+if ((Assert-ExitCode "bad position exits 1" 1 $r.ExitCode) -and
+    (Assert-OutputContains "bad position error" $r.Output "Unknown position")) {
+    Pass "--position invalid error"
+}
+
+# --position without argument
+$r = Run-Toasty @("test", "--position")
+if (Assert-ExitCode "--position no arg exits 1" 1 $r.ExitCode) {
+    Pass "--position missing argument"
+}
+
+# Position routes to custom toast (no Toast XML in output)
+$r = Run-Toasty @("test", "--position", "top-left", "--dry-run")
+if ((Assert-ExitCode "position uses custom toast" 0 $r.ExitCode) -and
+    (Assert-OutputContains "custom toast header" $r.Stdout "Custom positioned toast") -and
+    (Assert-OutputNotContains "no WinRT XML" $r.Stdout "Toast XML:")) {
+    Pass "position uses custom toast"
+}
+
+# Position preserves icon with --app preset
+$r = Run-Toasty @("test", "--app", "claude", "--position", "top-right", "--dry-run")
+if ((Assert-ExitCode "position+preset exits 0" 0 $r.ExitCode) -and
+    (Assert-OutputContains "position+preset icon" $r.Stdout "[dry-run] Icon:") -and
+    (Assert-OutputContains "position+preset title" $r.Stdout "Title: Claude")) {
+    Pass "--position with --app preset"
+}
+
+# ============================================================
+# Test Suite: Monitor Flag
+# ============================================================
+Write-Host "`nMonitor Tests" -ForegroundColor Cyan
+Write-Host ("=" * 40)
+
+# Monitor 1
+$r = Run-Toasty @("test", "--monitor", "1", "--dry-run")
+if ((Assert-ExitCode "monitor 1 exits 0" 0 $r.ExitCode) -and
+    (Assert-OutputContains "monitor 1 set" $r.Stdout "Monitor: 1")) {
+    Pass "--monitor 1"
+}
+
+# Monitor 2
+$r = Run-Toasty @("test", "-m", "2", "--dry-run")
+if ((Assert-ExitCode "monitor 2 exits 0" 0 $r.ExitCode) -and
+    (Assert-OutputContains "monitor 2 set" $r.Stdout "Monitor: 2")) {
+    Pass "-m 2 short form"
+}
+
+# Invalid monitor (0)
+$r = Run-Toasty @("test", "--monitor", "0", "--dry-run")
+if ((Assert-ExitCode "monitor 0 exits 1" 1 $r.ExitCode) -and
+    (Assert-OutputContains "monitor 0 error" $r.Output "Monitor index must be >= 1")) {
+    Pass "--monitor 0 error"
+}
+
+# Non-numeric monitor
+$r = Run-Toasty @("test", "--monitor", "abc", "--dry-run")
+if ((Assert-ExitCode "monitor abc exits 1" 1 $r.ExitCode) -and
+    (Assert-OutputContains "monitor abc error" $r.Output "Invalid monitor number")) {
+    Pass "--monitor non-numeric error"
+}
+
+# --monitor without argument
+$r = Run-Toasty @("test", "--monitor")
+if (Assert-ExitCode "--monitor no arg exits 1" 1 $r.ExitCode) {
+    Pass "--monitor missing argument"
+}
+
+# Monitor shows available monitors list
+$r = Run-Toasty @("test", "--monitor", "1", "--dry-run")
+if ((Assert-ExitCode "monitor lists displays" 0 $r.ExitCode) -and
+    (Assert-OutputContains "available monitors" $r.Stdout "Available monitors:")) {
+    Pass "monitor shows available list"
+}
+
+# Monitor + position combined
+$r = Run-Toasty @("test", "--monitor", "1", "--position", "top-left", "--dry-run")
+if ((Assert-ExitCode "monitor+position exits 0" 0 $r.ExitCode) -and
+    (Assert-OutputContains "combined monitor" $r.Stdout "Monitor: 1") -and
+    (Assert-OutputContains "combined position" $r.Stdout "Position: top-left")) {
+    Pass "--monitor + --position combined"
+}
+
+# ============================================================
+# Test Suite: Duration Flag
+# ============================================================
+Write-Host "`nDuration Tests" -ForegroundColor Cyan
+Write-Host ("=" * 40)
+
+# Custom duration
+$r = Run-Toasty @("test", "--duration", "30", "--dry-run")
+if ((Assert-ExitCode "duration 30 exits 0" 0 $r.ExitCode) -and
+    (Assert-OutputContains "duration 30s" $r.Stdout "Duration: 30s")) {
+    Pass "--duration 30"
+}
+
+# Short form
+$r = Run-Toasty @("test", "-d", "10", "--dry-run")
+if ((Assert-ExitCode "duration 10 exits 0" 0 $r.ExitCode) -and
+    (Assert-OutputContains "duration 10s" $r.Stdout "Duration: 10s")) {
+    Pass "-d 10 short form"
+}
+
+# Duration 1 (minimum)
+$r = Run-Toasty @("test", "--duration", "1", "--dry-run")
+if (Assert-ExitCode "duration 1 exits 0" 0 $r.ExitCode) {
+    Pass "--duration 1 minimum"
+}
+
+# Duration 300 (maximum)
+$r = Run-Toasty @("test", "--duration", "300", "--dry-run")
+if ((Assert-ExitCode "duration 300 exits 0" 0 $r.ExitCode) -and
+    (Assert-OutputContains "duration 300s" $r.Stdout "Duration: 300s")) {
+    Pass "--duration 300 maximum"
+}
+
+# Duration 0 (too low)
+$r = Run-Toasty @("test", "--duration", "0", "--dry-run")
+if ((Assert-ExitCode "duration 0 exits 1" 1 $r.ExitCode) -and
+    (Assert-OutputContains "duration 0 error" $r.Output "between 1 and 300")) {
+    Pass "--duration 0 error"
+}
+
+# Duration 301 (too high)
+$r = Run-Toasty @("test", "--duration", "301", "--dry-run")
+if ((Assert-ExitCode "duration 301 exits 1" 1 $r.ExitCode) -and
+    (Assert-OutputContains "duration 301 error" $r.Output "between 1 and 300")) {
+    Pass "--duration 301 error"
+}
+
+# Non-numeric duration
+$r = Run-Toasty @("test", "--duration", "abc", "--dry-run")
+if ((Assert-ExitCode "duration abc exits 1" 1 $r.ExitCode) -and
+    (Assert-OutputContains "duration abc error" $r.Output "Invalid duration")) {
+    Pass "--duration non-numeric error"
+}
+
+# --duration without argument
+$r = Run-Toasty @("test", "--duration")
+if (Assert-ExitCode "--duration no arg exits 1" 1 $r.ExitCode) {
+    Pass "--duration missing argument"
+}
+
+# Duration alone routes to custom toast
+$r = Run-Toasty @("test", "--duration", "15", "--dry-run")
+if ((Assert-ExitCode "duration routes custom" 0 $r.ExitCode) -and
+    (Assert-OutputContains "duration custom toast" $r.Stdout "Custom positioned toast") -and
+    (Assert-OutputContains "duration default pos" $r.Stdout "Position: bottom-right")) {
+    Pass "duration-only uses custom toast at bottom-right"
+}
+
+# Default toast shows default duration
+$r = Run-Toasty @("test", "--dry-run")
+if ((Assert-ExitCode "default duration exits 0" 0 $r.ExitCode) -and
+    (Assert-OutputContains "default duration" $r.Stdout "Duration: 5s (default)")) {
+    Pass "default toast shows 5s duration"
+}
+
+# Duration + position + monitor combined
+$r = Run-Toasty @("test", "-d", "20", "-p", "top-left", "-m", "1", "--dry-run")
+if ((Assert-ExitCode "all flags exits 0" 0 $r.ExitCode) -and
+    (Assert-OutputContains "combined duration" $r.Stdout "Duration: 20s") -and
+    (Assert-OutputContains "combined position" $r.Stdout "Position: top-left") -and
+    (Assert-OutputContains "combined monitor" $r.Stdout "Monitor: 1")) {
+    Pass "duration + position + monitor combined"
+}
+
+# ============================================================
 # Summary
 # ============================================================
 Write-Host "`n$("=" * 40)" -ForegroundColor Cyan
