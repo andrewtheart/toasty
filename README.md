@@ -23,6 +23,9 @@ toasty --status
 Options:
   -t, --title <text>   Set notification title (default: "Notification")
   --app <name>         Use AI CLI preset (claude, copilot, gemini, codex, cursor)
+  -p, --position <pos> Toast position (see Toast Positioning below)
+  -m, --monitor <n>    Show toast on monitor N (1, 2, 3, etc.)
+  -d, --duration <sec> How long the toast stays visible (default: 5)
   -v, --version        Show version and exit
   -h, --help           Show this help
   --install [agent]    Install hooks for AI CLI agents (claude, gemini, copilot, or all)
@@ -67,6 +70,46 @@ toasty "Processing finished" --app claude
 toasty "Build succeeded" --app copilot
 toasty "Query done" --app gemini
 ```
+
+## Toast Positioning
+
+By default, toasts appear in the bottom-right corner of your primary monitor (standard Windows behavior). Use `--position` and `--monitor` to control exactly where they show up.
+
+### Position
+
+```cmd
+toasty "Build done" --position top-left
+toasty "Tests passed" -p top-right
+toasty "Deploying..." -p middle-right
+toasty "All clear" -p bottom-middle
+```
+
+Available positions: `top-left`, `top-right`, `middle-left`, `middle-right`, `bottom-left`, `bottom-middle`, `bottom-right`
+
+Short aliases also work: `tl`, `tr`, `ml`, `mr`, `bl`, `bm`, `br`
+
+### Monitor Selection
+
+On multi-monitor setups, target a specific display:
+
+```cmd
+toasty "Check monitor 2" --monitor 2
+toasty "Top-left of monitor 3" -p top-left -m 3
+```
+
+Monitor numbers are 1-indexed. If the specified monitor doesn't exist, the toast falls back to the primary display.
+
+### Duration
+
+Control how long the toast stays visible (1–300 seconds, default 5):
+
+```cmd
+toasty "Important!" --duration 30
+toasty "Quick flash" -d 2
+toasty "Long notice" -d 60 -p top-right -m 2
+```
+
+> **Note:** When using `--position`, `--monitor`, or `--duration`, toasty renders a custom popup window (with GDI+) instead of the standard Windows toast. This ensures precise positioning and timing, and all icons (auto-detected or via `--app`) display correctly.
 
 ## One-Click Hook Installation
 
@@ -252,7 +295,7 @@ Run the test suite after building:
 .\tests\test-toasty.ps1 -ExePath .\build\Release\toasty.exe
 ```
 
-Tests use `--dry-run` to validate argument parsing, preset icons, toast XML generation, install/uninstall logic, and ntfy configuration without showing actual notifications or modifying any config files.
+Tests use `--dry-run` to validate argument parsing, preset icons, toast XML generation, install/uninstall logic, ntfy configuration, toast positioning, monitor selection, and duration without showing actual notifications or modifying any config files.
 
 ## License
 
